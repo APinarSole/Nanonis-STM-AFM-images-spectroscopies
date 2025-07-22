@@ -1,0 +1,274 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import nanonispy2 as nap
+import math
+import matplotlib.patheffects as pe
+import os
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+import matplotlib.font_manager as fm
+import glob
+
+"""
+=====================================================================
+ STM Image + STS/Z Spectroscopy Plotting Tool for Nanonis Data
+=====================================================================
+
+This script overlays the locations of STS or Z-spectroscopy measurements 
+on an STM scan image and plots the corresponding spectra (e.g., dI/dV vs V 
+or Frequency shift vs Z). It supports Nanonis file formats and handles 
+different software versions.
+
+===================== INSTRUCTIONS =====================
+
+1. Configure the INPUT PARAMETERS below.
+2. Set the folder path, image filename, and base name of the spectroscopy files.
+3. Choose the spectroscopy type, channel, and plotting mode.
+4. Run the script — it will display the STM image with points marked and
+   the extracted spectra stacked in a separate panel.
+5. Make sure your nanonis channel names are right, check the ''reading'' sections of the script
+and modify the channel names (can check them opening the files as text)
+You can freely adjust which points to plot, whether to use all points, 
+and how far apart to separate the spectra curves vertically.
+
+==================== INPUT PARAMETERS ===================
+
+"""
+
+# ------------------------ Spectroscopy Options ------------------------
+
+signal = 1        
+# Select which spectroscopy signal to plot:
+#   1 = dI/dV (X-channel of Lock-In Amplifier)
+#   2 = d²I/dV² (Y-channel of Lock-In Amplifier)
+
+typeplot = 0      
+# Type of spectroscopy plot:
+#   0 = Bias spectroscopy (e.g., dI/dV vs Bias Voltage)
+#   1 = Z-spectroscopy (e.g., Frequency Shift vs tip-sample distance)
+
+channel = 3       
+# Channel to display in the STM image (background image):
+#   1 = Current
+#   2 = Z (height)
+#   3 = Frequency Shift
+#   4 = Excitation
+
+separation_spec = 0    
+# Vertical separation between stacked spectroscopy curves (in arbitrary units).
+# Increase this to visually separate curves (e.g., try 0.1 or 0.2).
+
+spectr_points = []       
+# Indices of spectroscopy points to include in the plot.
+# Use:
+#   []              = all points found in folder
+#   [0, 1, 2]       = specific selected points
+#   list(range(10)) = first 10 points
+
+image_scale_nm = 0.5      
+# Length of the scalebar in nanometers shown on the STM image.
+
+# ------------------------ Path & File Setup ------------------------
+
+folder = r' (insert path here)' #write path
+# Path to the directory containing the STM image and spectroscopy .dat files
+
+image = 'image_name.sxm'  #insert image name here
+# STM scan image filename (must be in .sxm format)
+
+data = 'spectroscopy_0'  # spectroscopy name end in _0
+# Base name of the spectroscopy .dat files (i.e., the shared prefix)
+# The script automatically finds all files starting with this name
+# *** THE NAMES MUST END IN .000(NUMBER) FORMAT EG .0001, .0002 ETC
+# WRITE HERE ONLY THE FIRST 0 e.g. STS_Au_0001.dat WOULD BE WRITTEN STS_Au_0
+
+# ===============================================================
+# ===============================================================
+
+# File discovery
+files1 = []
+files2 = [0]
+for root, dirs, files in os.walk(folder):
+    for names in files:
+        if names.startswith(data):
+            files2.append(os.path.join(root, names))
+        if names == image:
+            files1.append(os.path.join(root, names))
+
+files1 = str(files1)
+
+# Extract just filenames from full paths
+filenames = [0]
+for x in range(1, len(files2)):
+    fil = files2[x][len(folder)+1:len(files2[1])]
+    filenames.append(fil)
+del filenames[0]
+filenames.sort()
+
+# Sort paths by index number in filename
+ind = []
+indexfiles2 = []
+for x in range(1, len(filenames)+1):
+    ind = files2[x][:len(files2[1])-4]
+    indexfiles2.append(ind)
+
+indexfiles2.sort()
+indexfiles3 = [f + '.dat' for f in indexfiles2]
+
+# If spectr_points is empty, include all
+if spectr_points == []:
+    spectr_points = range(0, len(indexfiles3))
+
+# Lists to store spectra data
+current = []
+bias = []
+conductance = []
+xspec = []
+yspec = []
+zspec = []
+zrel = []
+fshift = []
+
+# Read each spectroscopy file
+for x in spectr_points:
+    f = nap.read.Spec(indexfiles3[x])
+
+    if 'Frequency Shift (Hz)' in f.signals:  # JT version
+        bias.append(np.array(f.signals['Bias calc (V)']))
+        conductance.append(np.array(f.signals['Input 3 (V)']))
+        current.append(np.array(f.signals['Current (A)']))
+        fshift.append(np.array(f.signals['Frequency Shift (Hz)']))
+    else:  # Q+, Olomouc version
+        bias.append(np.array(f.signals['Bias calc (V)']))
+        current.append(np.array(f.signals['Current (A)']))
+        fshift.append(np.array(f.signals['OC M1 Freq. Shift (Hz)']))
+        if signal == 1:
+            conductance.append(np.array(f.signals['LI Demod 1 X (A)']))
+        else:
+            conductance.append(np.array(f.signals['LI Demod 1 Y (A)']))
+
+    zspec.append(float(f.header['Z (m)']))
+    xspec.append(float(f.header['X (m)']))
+    yspec.append(float(f.header['Y (m)']))
+    if typeplot == 1:
+        zrel.append(np.array(f.signals['Z rel (m)']))
+
+# Read STM image
+a = nap.read.Scan(folder + "\\" + image)
+c = a.signals
+pixels = a.header['scan_pixels']  # Number of pixels (X, Y)
+
+# Get scan size and rotation angle
+if 'OC_M1_Freq._Shift' in a.signals:  # Q+, Olomouc
+    offset = a.header['scan_offset']
+    scanrange = a.header['scan_range']
+    angle = math.radians(180 + float(a.header['scan_angle']))
+    xcenter = float(offset[0])
+    ycenter = float(offset[1])
+    xwidth = float(scanrange[0])
+    yheight = float(scanrange[1])
+    direccion = a.header['scan_dir']
+else:
+    scanfield = a.header['scan>scanfield'].split(';')
+    angle = math.radians(180 + float(a.header['scan_angle']))
+    xcenter = float(scanfield[0])
+    ycenter = float(scanfield[1])
+    xwidth = float(scanfield[2])
+    yheight = float(scanfield[3])
+    direccion = a.header['scan_dir']
+
+# Pixel resolution
+xl = pixels[0] / xwidth
+yl = pixels[1] / yheight
+
+x0 = xcenter - xwidth / 2
+y0 = ycenter - yheight / 2
+
+xval = (np.array(xspec) - x0) * xl
+yval = (np.array(yspec) - y0) * yl
+
+# Rotate coordinates
+xpixel = xwidth * xl / 2 - (np.cos(angle) * (xval - xwidth * xl / 2) - np.sin(angle) * (yval - yheight * yl / 2))
+ypixel = yheight * yl / 2 - (np.sin(angle) * (xval - xwidth * xl / 2) + np.cos(angle) * (yval - yheight * yl / 2))
+
+# Filter valid pixel positions
+Xpixel, Ypixel, Bias, Conductance, Current, g = [], [], [], [], [], []
+zz, xx, yy, Zrel, df = [], [], [], [], []
+
+for i in range(len(current)):
+    if abs(xpixel[i]) < pixels[0] and abs(ypixel[i]) < pixels[1]:
+        Xpixel.append(xpixel[i])
+        Ypixel.append(ypixel[i])
+        Bias.append(bias[i])
+        Conductance.append(conductance[i])
+        Current.append(current[i])
+        g.append(filenames[i])
+        zz.append(round(float(zspec[i]) * 1e9, 2))
+        xx.append(round(float(xspec[i]) * 1e9, 2))
+        yy.append(round(float(yspec[i]) * 1e9, 2))
+        if typeplot == 1:
+            Zrel.append(zrel[i])
+
+# Read STM image channels
+
+if direccion == 'up':
+    current = a.signals['Current']['forward']
+    df = a.signals['OC_M1_Freq._Shift']['forward']
+    Z = a.signals['Z']['forward']
+    excitation = a.signals['OC_M1_Excitation']['forward']
+    didv = a.signals['LI_Demod_1_Y']['forward'] if signal == 1 else a.signals['LI_Demod_1_X']['forward']
+else:
+    current = a.signals['Current']['forward'][::-1]
+    df = a.signals['OC_M1_Freq._Shift']['forward'][::-1]
+    Z = a.signals['Z']['forward']
+    excitation = a.signals['OC_M1_Excitation']['forward'][::-1]
+    didv = a.signals['LI_Demod_1_Y']['forward'][::-1] if signal == 1 else a.signals['LI_Demod_1_X']['forward'][::-1]
+
+# Choose image channel
+plot = {
+    1: current,
+    2: Z,
+    3: df,
+    4: excitation
+}[channel]
+titulo = {
+    1: 'Current',
+    2: 'STM',
+    3: 'Freq. Shift',
+    4: 'Excitation'
+}[channel]
+
+# ========================= Plotting ===============================
+
+fig = plt.figure(figsize=(20, 20))
+ax1 = fig.add_subplot(211) if pixels[0] > pixels[1] else fig.add_subplot(221)
+ax2 = fig.add_subplot(212) if pixels[0] > pixels[1] else fig.add_subplot(222)
+
+# Add scalebar
+fontprops = fm.FontProperties(size=25)
+scalebar = AnchoredSizeBar(ax1.transData, (xl * 1e-9) * image_scale_nm, f'{image_scale_nm} nm', 'lower right',
+                           pad=0.3, color='white', frameon=False, size_vertical=2,
+                           fontproperties=fontprops)
+
+# STM image with points
+for i in range(len(Xpixel)):
+    ax1.plot(Xpixel[i], Ypixel[i], 'o', markersize=12,
+             path_effects=[pe.Stroke(linewidth=5, foreground='w'), pe.Normal()])
+    ax1.imshow(plot, interpolation='None', origin='lower')
+    ax1.tick_params(left=False, right=False, labelleft=False, labelbottom=False, bottom=False)
+    ax1.set_title(titulo)
+ax1.add_artist(scalebar)
+
+# Spectra curves
+for i in range(len(Bias)):
+    if typeplot == 0:
+        ax2.plot(Bias[i] * 1000, Conductance[i] + i * separation_spec, linewidth=2)
+    else:
+        ax2.plot(Zrel[i] * 1e9, fshift[i], linewidth=2.5)
+
+ax2.set_xlabel('Bias [mV]' if typeplot == 0 else 'Z rel [nm]', fontsize=22)
+ax2.set_ylabel('dI/dV [a.u.]' if typeplot == 0 else 'Freq. Shift [Hz]', fontsize=22)
+ax2.tick_params(axis='x', labelsize=20)
+ax2.tick_params(axis='y', labelsize=20)
+
+plt.tight_layout()
+plt.show()
